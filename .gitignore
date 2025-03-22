@@ -1,0 +1,6 @@
+.env
+*.md
+*.txt
+.venv
+./chromadb
+
