@@ -66,24 +66,23 @@ def load_rag_system(chromadb_path):
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.0-flash",
         temperature=0.7,
-        google_api_key=GOOGLE_API_KEY,
-        # system_prompt="""You are an assistant designed to represent Niko Canner, an 
-        # investor, entrepreneur, philosopher, and founder of Incandescent, a consulting firm in NYC.
-        # You respond based ONLY on what you find in your knowledge base, which are 
-        # blog posts written by Niko. If you don't find something in the knowledge base,
-        # just say so, and don't make up anything else.
-        # Summarize the documents you find and respond in first person, 
-        # balancing a conversational and professional tone. Your responses are a
-        # good balance of length and depth.
-        # RESPOND IN FIRST PERSON ONLY!!!"""
-        # system_prompt="You are a poet and only respond in poetry"
+        google_api_key=GOOGLE_API_KEY
     )
 
     from langchain.prompts import PromptTemplate
 
     # Create a custom prompt that includes both the system instruction and retrieved documents
-    template = """You are a poet and only respond in bad poetry.
-    
+    template = """You are an assistant designed to represent Niko Canner, an 
+    investor, entrepreneur, philosopher, and founder of Incandescent, a consulting firm in NYC.
+    You respond based ONLY on what you find in your knowledge base, which are 
+    blog posts written by Niko. If you don't find something in the knowledge base,
+    just say so, and don't make up anything else.
+    Summarize the documents you find and respond in first person, 
+    balancing a conversational and professional tone. Your responses are a
+    good balance of length and depth.
+
+    RESPOND IN FIRST PERSON ONLY!!!
+
     Context information is below.
     ---------------------
     {context}
@@ -105,14 +104,6 @@ def load_rag_system(chromadb_path):
         verbose=DEBUG_LEVEL > 0,
         combine_docs_chain_kwargs={"prompt": custom_prompt}
     )
-    # Create the conversational chain
-    # debug("Creating ConversationalRetrievalChain")
-    # conversation_chain = ConversationalRetrievalChain.from_llm(
-    #     llm=llm,
-    #     retriever=retriever,
-    #     memory=memory,
-    #     verbose=DEBUG_LEVEL > 0
-    # )
     
     debug("RAG system setup complete")
     return conversation_chain
@@ -151,10 +142,10 @@ def process_message(message, history):
 
 # Create the Gradio interface
 debug("Setting up Gradio ChatInterface")
-demo = gr.ChatInterface(
+bot = gr.ChatInterface(
     fn=process_message,
-    title="Knowledge Base Chat",
-    description="Ask questions and get answers based on the knowledge base.",
+    title="Chat with Niko",
+    description="Ask questions and get answers based on Niko's blog.",
     examples=[
         "Give me some tips to manage conflicts",
         "What is the most important color in business and why?"
@@ -167,4 +158,4 @@ if __name__ == "__main__":
     CHROMA_PATH = os.getenv("CHROMA_PATH", CHROMA_PATH)
     debug(f"Using ChromaDB from: {CHROMA_PATH}")
     debug("Launching Gradio interface")
-    demo.launch()
+    bot.launch()
