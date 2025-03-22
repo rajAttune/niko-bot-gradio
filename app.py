@@ -158,4 +158,4 @@ if __name__ == "__main__":
     CHROMA_PATH = os.getenv("CHROMA_PATH", CHROMA_PATH)
     debug(f"Using ChromaDB from: {CHROMA_PATH}")
     debug("Launching Gradio interface")
-    bot.launch()
+    bot.launch(share=True)

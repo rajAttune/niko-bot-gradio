@@ -1,0 +1,6 @@
+---
+title: Pursuing a Life's Work
+date: Oct 12 2022
+---
+
+I have learned many things from Ray Dalio, of which the most important has been his example of the power of combining (1) clear goals, unconstrained by limitations of what one knows how to achieve today; (2) explicit principles for thought and action; (3) intentionality, discipline and passion in applying these principles to each day’s events, over the course of many years.When I first met Ray, he was still early in the process of conceptualizing and planning the transition that he completed last week. What moved me then, and moves me even more greatly now, was how Ray thought about transition not simply in terms of the long-term sustainability of a great business and successors of superb quality, but as the work of building a framework for the unique culture of Bridgewater to be sustained over generations.It is a great pleasure to see this first “book” in a great epic reach its fitting conclusion, after 47 years. The story of what Ray built and how he built it is a map for how it is possible to create an institution both deeply personal in its vision and much, much greater than any individual. I can imagine no higher standard for what it means to pursue a life’s work. Image credits: Left: Ray Dalio (Source) Right: Copyright by World Economic Forum, Photo Michael Wuertenberg
