@@ -187,6 +187,13 @@ def generate_response(state: State) -> Dict:
     ---------------------
 
     Given the context information and not prior knowledge, answer the question: {question}
+
+    With your response, return a list of the documents you're drawing your response 
+    from as a list of citations with the heading
+
+    References:
+
+    <list of references here>
     """
     
     prompt = PromptTemplate(template=template, input_variables=["context", "question"])
