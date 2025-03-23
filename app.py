@@ -1,6 +1,7 @@
 import os
 import sys
 import gradio as gr
+import re
 from dotenv import load_dotenv
 from typing import List, Dict, Optional, Annotated, TypedDict
 
@@ -155,6 +156,31 @@ def retrieve_documents(state: State) -> Dict:
         debug(f"Error during reranking: {e}")
         return {"retrieval_documents": docs[:5]}
 
+def format_sources(docs: List[Document]) -> str:
+    """Format source documents in the required format: '* Title (date)'"""
+    sources = []
+    seen_titles = set()  # To track unique sources
+    
+    for doc in docs:
+        # Extract metadata
+        metadata = doc.metadata
+        title = metadata.get("title", "Untitled Document")
+        date = metadata.get("date", "No date")
+        
+        # Create source entry
+        source_entry = f"* {title} ({date})"
+        
+        # Only add if we haven't seen this title before
+        if title not in seen_titles:
+            sources.append(source_entry)
+            seen_titles.add(title)
+    
+    # Format as a string
+    if sources:
+        return "\n\nReferences:\n" + "\n".join(sources)
+    else:
+        return "\n\nReferences:\n* No specific sources found"
+
 def generate_response(state: State) -> Dict:
     """Generate a response using the retrieved documents as context"""
     messages = state.get("messages", [])
@@ -169,12 +195,16 @@ def generate_response(state: State) -> Dict:
     # Create a context string from the documents
     context_str = "\n\n".join([doc.page_content for doc in docs])
     
-    # Custom prompt template
+    # Format sources in the required format
+    sources_str = format_sources(docs)
+    
+    # Custom prompt template - modified to ensure consistent source formatting
     template = """You are an assistant designed to represent Niko Canner, an 
     investor, entrepreneur, philosopher, and founder of Incandescent, a consulting firm in NYC.
     You respond based ONLY on what you find in your knowledge base, which are 
     blog posts written by Niko. If you don't find something in the knowledge base,
     just say so, and don't make up anything else.
+    
     Summarize the documents you find and respond in first person, 
     balancing a conversational and professional tone. Your responses are a
     good balance of length and depth.
@@ -187,13 +217,6 @@ def generate_response(state: State) -> Dict:
     ---------------------
 
     Given the context information and not prior knowledge, answer the question: {question}
-
-    With your response, return a list of the documents you're drawing your response 
-    from as a list of citations with the heading
-
-    References:
-
-    <list of references here>
     """
     
     prompt = PromptTemplate(template=template, input_variables=["context", "question"])
@@ -205,8 +228,14 @@ def generate_response(state: State) -> Dict:
     response = llm.invoke(formatted_prompt)
     content = response.content
     
+    # Remove any references section that might have been generated despite instructions
+    content = re.sub(r'\n+References:.*?$', '', content, flags=re.DOTALL)
+    
+    # Append our properly formatted sources
+    final_content = content + sources_str
+    
     # Create AIMessage
-    ai_message = AIMessage(content=content)
+    ai_message = AIMessage(content=final_content)
     
     return {"messages": [ai_message]}
 
@@ -264,9 +293,9 @@ def create_interface():
         title="Chat with Niko",
         description="Ask questions and get answers based on Niko's blog.",
         examples=[
-            "Give me some tips to manage conflicts",
-            "What is the most important color in business and why?",
-            "How do I handle difficult conversations?"
+            "What is the most important color and why?",
+            "How do I handle difficult conversations?",
+            "What are the 6 Cs?"
         ]
     )
     return bot
