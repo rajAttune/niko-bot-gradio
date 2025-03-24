@@ -33,8 +33,11 @@ def debug(message):
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     query: Optional[str]
+    original_query: Optional[str]  # Store original query before enhancement
     retrieval_documents: Optional[List[Document]]
     results: Optional[str]
+    history: List[Dict[str, str]]  # New field to store conversation history
+    query_type: Optional[str]  # Store query classification (new, followup, clarification)
 
 # Initialize the memory saver for persistence
 memory = MemorySaver()
@@ -62,28 +65,57 @@ reranker_llm = ChatGoogleGenerativeAI(
 # Define the nodes for our graph
 
 def extract_query(state: State) -> Dict:
-    """Extract the query from the latest message"""
+    """Extract the query from the latest message and enhance with history if needed"""
     messages = state["messages"]
+    history = state.get("history", [])
+    
     if not messages:
         return {"query": None}
     
     # Get the most recent user message
+    current_query = None
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage) or msg.get("role") == "user":
-            query = msg.content if hasattr(msg, "content") else msg.get("content", "")
-            debug(f"Extracted query: {query}")
-            return {"query": query}
+            current_query = msg.content if hasattr(msg, "content") else msg.get("content", "")
+            debug(f"Extracted current query: {current_query}")
+            break
     
-    return {"query": None}
+    if not current_query:
+        return {"query": None}
+        
+    # Handle different query enhancement strategies based on query type
+    enhanced_query = enhance_query_with_history(current_query, history)
+    debug(f"Enhanced query: {enhanced_query}")
+    
+    return {
+        "query": enhanced_query,
+        "original_query": current_query  # Store original for prompt
+    }
 
 def retrieve_documents(state: State) -> Dict:
-    """Retrieve and rerank documents from the vector store"""
+    """Retrieve and rerank documents from the vector store using enhanced query"""
     query = state.get("query")
+    original_query = state.get("original_query", query)
+    
     if not query:
         debug("No query to retrieve documents for")
         return {"retrieval_documents": []}
+        
+    # Classify query type
+    history = state.get("history", [])
+    last_exchange = history[-1] if history else None
+    query_type = "new_topic"
+    
+    if last_exchange:
+        query_type = classify_query_type(original_query, last_exchange)
+        
+    debug(f"Query type classified as: {query_type}")
+    
+    # Store query type in state
+    state_updates = {"query_type": query_type}
     
     debug(f"Retrieving documents for query: {query}")
+    debug(f"Query type: {query_type}")
     
     # Load the vector store
     CHROMA_PATH = os.getenv("CHROMA_PATH", "./chromadb")
@@ -92,8 +124,46 @@ def retrieve_documents(state: State) -> Dict:
         embedding_function=embeddings
     )
     
-    # Get initial documents
-    docs = vectorstore.similarity_search(query, k=10)
+    # Get initial documents based on query type
+    docs = []
+    
+    if query_type == "new_topic":
+        # For new topics, just use the current query
+        docs = vectorstore.similarity_search(query, k=10)
+        debug("Using standard retrieval for new topic")
+        
+    elif query_type == "followup":
+        # For follow-ups, try hybrid approach
+        # 1. Retrieve based on enhanced query
+        enhanced_docs = vectorstore.similarity_search(query, k=7)
+        
+        # 2. Also retrieve based on original query with higher k value
+        original_docs = vectorstore.similarity_search(original_query, k=5)
+        
+        # Combine documents with deduplication (prioritize enhanced results)
+        seen_ids = set()
+        docs = []
+        
+        # First add enhanced results
+        for doc in enhanced_docs:
+            doc_id = doc.metadata.get("id", doc.page_content[:50])
+            if doc_id not in seen_ids:
+                docs.append(doc)
+                seen_ids.add(doc_id)
+        
+        # Then add original results if not already included
+        for doc in original_docs:
+            doc_id = doc.metadata.get("id", doc.page_content[:50])
+            if doc_id not in seen_ids and len(docs) < 10:
+                docs.append(doc)
+                seen_ids.add(doc_id)
+                
+        debug(f"Using hybrid retrieval for follow-up question, found {len(docs)} documents")
+        
+    else:  # clarification
+        # For clarifications, prioritize retrieval based on enhanced query
+        docs = vectorstore.similarity_search(query, k=10)
+        debug("Using enhanced retrieval for clarification")
     debug(f"Retrieved {len(docs)} initial documents")
     
     if not docs:
@@ -110,7 +180,8 @@ def retrieve_documents(state: State) -> Dict:
     
     # Rerank with Gemini
     rerank_prompt = f"""
-    You are a document reranking system. Your task is to rerank the following documents based on their relevance to the query.
+    You are a document reranking system. 
+    Your task is to rerank the following documents based on their relevance to the query.
     
     Query: {query}
     
@@ -145,12 +216,12 @@ def retrieve_documents(state: State) -> Dict:
                 # Reorder documents
                 reranked_docs = [docs[idx] for idx in valid_indices[:5]]
                 debug(f"Returning {len(reranked_docs)} reranked documents")
-                return {"retrieval_documents": reranked_docs}
+                return {**state_updates, "retrieval_documents": reranked_docs}
             except Exception as e:
                 debug(f"Error parsing reranking indices: {e}")
         
         debug("Reranking failed, returning top-k original documents")
-        return {"retrieval_documents": docs[:5]}
+        return {**state_updates, "retrieval_documents": docs[:5]}
         
     except Exception as e:
         debug(f"Error during reranking: {e}")
@@ -181,16 +252,150 @@ def format_sources(docs: List[Document]) -> str:
     else:
         return "\n\nReferences:\n* No specific sources found"
 
+def format_chat_history(history: List[Dict[str, str]], max_turns: int = 3) -> str:
+    """Format the chat history for inclusion in the prompt"""
+    if not history:
+        return ""
+    
+    # Take only the most recent exchanges, limited by max_turns
+    recent_history = history[-max_turns:]
+    
+    formatted_history = []
+    for exchange in recent_history:
+        user_message = exchange.get("user", "")
+        ai_message = exchange.get("assistant", "")
+        
+        # Remove references section from AI messages for cleaner history
+        ai_message = re.sub(r'\n+References:.*?$', '', ai_message, flags=re.DOTALL)
+        
+        formatted_history.append(f"User: {user_message}")
+        formatted_history.append(f"Assistant: {ai_message}")
+    
+    return "\n".join(formatted_history)
+
+def enhance_query_with_history(query: str, history: List[Dict[str, str]]) -> str:
+    """Enhance query with history based on query type detection
+    
+    Implements three strategies:
+    1. For new topics: Use query as-is
+    2. For follow-ups: Augment query with key terms from previous exchange
+    3. For clarifications: Use recent history + query
+    """
+    if not history:
+        return query
+    
+    # Get the last exchange
+    last_exchange = history[-1] if history else None
+    if not last_exchange:
+        return query
+    
+    # Attempt to classify query type
+    query_type = classify_query_type(query, last_exchange)
+    
+    # Apply enhancement strategy based on query type
+    if query_type == "new_topic":
+        # Independent question - use as is
+        return query
+        
+    elif query_type == "followup":
+        # Follow-up question - add key terms from last exchange
+        last_user_query = last_exchange.get("user", "")
+        key_terms = extract_key_terms(last_user_query)
+        # Combine but prioritize current query
+        return f"{query} (context: {key_terms})"
+        
+    elif query_type == "clarification":
+        # Multi-turn clarification - use more history
+        # Include user's previous query and key points from assistant's response
+        last_user_query = last_exchange.get("user", "")
+        last_response = last_exchange.get("assistant", "")
+        # Get first sentence of response to capture main point
+        first_sentence = last_response.split(".")[0] if last_response else ""
+        return f"{query} (referring to: {last_user_query} - {first_sentence})"
+        
+    # Default fallback
+    return query
+
+def classify_query_type(query: str, last_exchange: Dict[str, str]) -> str:
+    """Classify query as new topic, follow-up, or clarification
+    
+    Uses simple heuristics - could be replaced with more sophisticated methods
+    """
+    query = query.lower()
+    last_query = last_exchange.get("user", "").lower()
+    
+    # Check for explicit reference words
+    reference_terms = ["it", "that", "this", "those", "they", "he", "she", 
+                       "the same", "the above", "mentioned", "previous"]
+    
+    # Check for follow-up indicators
+    followup_indicators = ["more", "explain", "elaborate", "tell me more", 
+                           "what about", "how about", "why", "expand"]
+    
+    # Simple reference detection
+    for term in reference_terms:
+        if term in query:
+            return "clarification"
+    
+    # Follow-up detection
+    for indicator in followup_indicators:
+        if indicator in query:
+            return "followup"
+    
+    # Check for overlapping terms (excluding common words)
+    common_words = {"the", "a", "an", "and", "or", "but", "in", "on", "with", 
+                   "is", "are", "was", "were", "be", "to", "for", "of"}
+    
+    # Tokenize and filter
+    query_terms = {term.lower() for term in query.split() 
+                  if term.lower() not in common_words}
+    last_terms = {term.lower() for term in last_query.split() 
+                 if term.lower() not in common_words}
+    
+    # Calculate overlap
+    overlap = query_terms.intersection(last_terms)
+    overlap_ratio = len(overlap) / len(query_terms) if query_terms else 0
+    
+    # High overlap suggests clarification or follow-up
+    if overlap_ratio > 0.3:
+        return "followup"
+    
+    # Default to new topic
+    return "new_topic"
+
+def extract_key_terms(text: str) -> str:
+    """Extract key terms from text, skipping common words"""
+    common_words = {"the", "a", "an", "and", "or", "but", "in", "on", "with", 
+                   "is", "are", "was", "were", "be", "to", "for", "of", "you", 
+                   "me", "what", "who", "how", "why", "when", "where"}
+    
+    # Simple extraction - keep words with 4+ chars that aren't common
+    terms = [word for word in text.lower().split() 
+             if len(word) >= 4 and word not in common_words]
+    
+    # Return top 3-5 terms
+    return " ".join(terms[:5])
+
 def generate_response(state: State) -> Dict:
-    """Generate a response using the retrieved documents as context"""
+    """Generate a response using the retrieved documents as context and chat history"""
     messages = state.get("messages", [])
     docs = state.get("retrieval_documents", [])
-    query = state.get("query", "")
+    query = state.get("original_query", state.get("query", ""))  # Use original query for response
+    history = state.get("history", [])
     
     if not query or not docs:
         debug("No query or documents to generate response from")
         # Just use the raw LLM if no context
-        return {"messages": [llm.invoke(messages)]}
+        ai_response = llm.invoke(messages)
+        
+        # Update history
+        new_exchange = {"user": query, "assistant": ai_response.content}
+        updated_history = history + [new_exchange]
+        
+        return {
+            "messages": [ai_response],
+            "history": updated_history
+        }
     
     # Create a context string from the documents
     context_str = "\n\n".join([doc.page_content for doc in docs])
@@ -198,7 +403,13 @@ def generate_response(state: State) -> Dict:
     # Format sources in the required format
     sources_str = format_sources(docs)
     
-    # Custom prompt template - modified to ensure consistent source formatting
+    # Format chat history (last 3 exchanges)
+    history_str = format_chat_history(history, max_turns=3)
+    
+    # Get query type for prompt customization
+    query_type = state.get("query_type", "new_topic")
+    
+    # Custom prompt template - modified to include chat history with query type awareness
     template = """You are an assistant designed to represent Niko Canner, an 
     investor, entrepreneur, philosopher, and founder of Incandescent, a consulting firm in NYC.
     You respond based ONLY on what you find in your knowledge base, which are 
@@ -210,18 +421,38 @@ def generate_response(state: State) -> Dict:
     good balance of length and depth.
 
     RESPOND IN FIRST PERSON ONLY!!!
-
+    
+    {history_section}
+    
     Context information is below.
     ---------------------
     {context}
     ---------------------
 
     Given the context information and not prior knowledge, answer the question: {question}
+    
+    Query type: {query_type}
     """
     
-    prompt = PromptTemplate(template=template, input_variables=["context", "question"])
+    # Add history section if history exists
+    history_section = ""
+    if history_str:
+        history_section = f"""Previous conversation:
+    ---------------------
+    {history_str}
+    ---------------------"""
     
-    formatted_prompt = prompt.format(context=context_str, question=query)
+    prompt = PromptTemplate(
+        template=template, 
+        input_variables=["context", "question", "history_section", "query_type"]
+    )
+    
+    formatted_prompt = prompt.format(
+        context=context_str, 
+        question=query, 
+        history_section=history_section,
+        query_type=query_type
+    )
     debug("Sending prompt to Gemini")
     
     # Get response from LLM
@@ -237,19 +468,34 @@ def generate_response(state: State) -> Dict:
     # Create AIMessage
     ai_message = AIMessage(content=final_content)
     
-    return {"messages": [ai_message]}
+    # Update history with the new exchange
+    new_exchange = {"user": query, "assistant": final_content}
+    updated_history = history + [new_exchange]
+    
+    return {
+        "messages": [ai_message],
+        "history": updated_history
+    }
+
+def initialize_state(state: State) -> Dict:
+    """Initialize state with empty history if not present"""
+    if "history" not in state:
+        return {"history": []}
+    return {}
 
 # Build the graph
 def create_graph():
     graph_builder = StateGraph(State)
     
     # Add nodes
+    graph_builder.add_node("initialize_state", initialize_state)
     graph_builder.add_node("extract_query", extract_query)
     graph_builder.add_node("retrieve_documents", retrieve_documents)
     graph_builder.add_node("generate_response", generate_response)
     
     # Add edges
-    graph_builder.add_edge(START, "extract_query")
+    graph_builder.add_edge(START, "initialize_state")
+    graph_builder.add_edge("initialize_state", "extract_query")
     graph_builder.add_edge("extract_query", "retrieve_documents")
     graph_builder.add_edge("retrieve_documents", "generate_response")
     graph_builder.add_edge("generate_response", END)
@@ -308,3 +554,4 @@ if __name__ == "__main__":
     debug("Launching Gradio interface")
     bot = create_interface()
     bot.launch(share=True)
+
